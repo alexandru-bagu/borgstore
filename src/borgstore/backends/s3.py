@@ -206,7 +206,10 @@ class S3(BackendBase):
             raise BackendError(f"Directory not empty: {name}")
         self.s3.delete_object(Bucket=self.bucket, Key=prefix + self.dir_file)
 
-    def _info(self, name):
+    def info(self, name):
+        if not self.opened:
+            raise BackendMustBeOpen()
+        validate_name(name)
         validate_name(name)
         key = self.base_path + name
         try:
@@ -221,9 +224,3 @@ class S3(BackendBase):
                     pass
                 return ItemInfo(name=name, exists=False, directory=False, size=0)
             raise BackendError(f"S3 error: {e}")
-
-    def info(self, name):
-        if not self.opened:
-            raise BackendMustBeOpen()
-        validate_name(name)
-        return self._info(name)
