@@ -16,9 +16,9 @@ import threading
 import os
 import time
 
-max_workers = int(os.environ.get("BORG_S3_CONCURRENT_UPLOADS", "16"))
-async_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-for _ in range(max_workers):
+MAX_WORKERS = int(os.environ.get("BORG_S3_CONCURRENT_UPLOADS", "16"))
+async_executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
+for _ in range(MAX_WORKERS):
     async_executor.submit(lambda : time.sleep(0.1))
 
 
@@ -62,17 +62,22 @@ class Queue:
         #     sys.stderr.write(f"waiting for op {op}: {self._count} > {max_queue_size}\n")
         while max_queue_size >= 0 and self._count > max_queue_size:
             time.sleep(0.001)
-        return self
-
-    def __enter__(self):
         self._lock.acquire()
         self._count += 1
         self._lock.release()
+        return self
 
-    def __exit__(self, *args):
+    def exit(self):
         self._lock.acquire()
         self._count -= 1
         self._lock.release()
+    
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.exit()
+        return False
 
 
 class S3(BackendBase):
@@ -141,14 +146,18 @@ class S3(BackendBase):
             self.opened = False
 
     def _async_store(self, key, value):
-        with self.queue.enter(max_queue_size=16, op="store"):
+        try:
             self.s3.put_object(Bucket=self.bucket, Key=key, Body=value)
+        except self.s3.exceptions.ClientError:
+            pass
+        self.queue.exit()
 
     def store(self, name, value):
         if not self.opened:
             raise BackendMustBeOpen()
         validate_name(name)
         key = self.base_path + name
+        self.queue.enter(max_queue_size=MAX_WORKERS, op="store")
         async_executor.submit(lambda : self._async_store(key, value))
 
     def load(self, name, *, size=None, offset=0):
