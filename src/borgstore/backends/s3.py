@@ -184,20 +184,31 @@ class S3(BackendBase):
             except self.s3.exceptions.NoSuchKey:
                 raise ObjectNotFound(name)
 
+    def _async_delete(self, key, value):
+        try:
+            self.s3.delete_object(Bucket=self.bucket, Key=key)
+        except self.s3.exceptions.ClientError:
+            pass
+        self.queue.exit()
+
     def delete(self, name):
         if not self.opened:
             raise BackendMustBeOpen()
         validate_name(name)
         key = self.base_path + name
-        with self.queue.enter(max_queue_size=0, op="delete"):
-            try:
-                self.s3.head_object(Bucket=self.bucket, Key=key)
-                self.s3.delete_object(Bucket=self.bucket, Key=key)
-            except self.s3.exceptions.NoSuchKey:
-                raise ObjectNotFound(name)
-            except self.s3.exceptions.ClientError as e:
-                if e.response['Error']['Code'] == '404':
+        if os.environ.get('BORGSTORE_TEST_S3_URL') is None:
+            self.queue.enter(max_queue_size=MAX_WORKERS, op="delete")
+            async_executor.submit(lambda : self._async_delete(key, key))
+        else:
+            with self.queue.enter(max_queue_size=MAX_WORKERS, op="delete"):
+                try:
+                    self.s3.head_object(Bucket=self.bucket, Key=key)
+                    self.s3.delete_object(Bucket=self.bucket, Key=key)
+                except self.s3.exceptions.NoSuchKey:
                     raise ObjectNotFound(name)
+                except self.s3.exceptions.ClientError as e:
+                    if e.response['Error']['Code'] == '404':
+                        raise ObjectNotFound(name)
 
     def move(self, curr_name, new_name):
         if not self.opened:
