@@ -190,9 +190,9 @@ class Store:
         suffix = DEL_SUFFIX if deleted else None
         for level in self._get_levels(name):
             nested_name = nest(name, level, add_suffix=suffix)
-            info = self.backend.info(nested_name)
-            if info.exists:
-                break
+            #info = self.backend.info(nested_name)
+            #if info.exists:
+            break
         return nested_name
 
     def info(self, name: str, *, deleted=False) -> ItemInfo:
