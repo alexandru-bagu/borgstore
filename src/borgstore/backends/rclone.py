@@ -11,7 +11,6 @@ import secrets
 from typing import Iterator
 import time
 import socket
-import logging
 
 from ._base import BackendBase, ItemInfo, validate_name
 from .errors import (
@@ -29,6 +28,7 @@ RCLONE = os.environ.get("RCLONE_BINARY", "rclone")
 
 # Debug HTTP requests and responses
 if False:
+    import logging
     import http.client as http_client
 
     http_client.HTTPConnection.debuglevel = 1
@@ -40,26 +40,23 @@ if False:
 
 
 def get_rclone_backend(url):
-    rclone_log = logging.getLogger("borgstore.backends.rclone")
     """get rclone URL
     rclone:remote:
     rclone:remote:path
     """
-    # Check rclone is on the path
-    try:
-        info = json.loads(subprocess.check_output([RCLONE, "rc", "--loopback", "core/version"]))
-    except Exception:
-        rclone_log.error("rclone binary not found on the path or not working properly")
-        return None
-    if info["decomposed"] < [1, 57, 0]:
-        rclone_log.error(f"rclone binary too old - need at least version v1.57.0 - found {info['version']}")
-        return None
     rclone_regex = r"""
         rclone:
         (?P<path>(.*))
     """
     m = re.match(rclone_regex, url, re.VERBOSE)
     if m:
+        # Check rclone is on the path
+        try:
+            info = json.loads(subprocess.check_output([RCLONE, "rc", "--loopback", "core/version"]))
+        except Exception:
+            raise BackendDoesNotExist("rclone binary not found on the path or not working properly")
+        if info["decomposed"] < [1, 57, 0]:
+            raise BackendDoesNotExist(f"rclone binary too old - need at least version v1.57.0 - found {info['version']}")
         return Rclone(path=m["path"])
 
 
