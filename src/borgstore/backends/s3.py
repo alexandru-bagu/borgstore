@@ -15,11 +15,12 @@ import concurrent.futures
 import threading
 import os
 import time
+import sys
+import logging
+
 
 MAX_WORKERS = int(os.environ.get("BORG_S3_CONCURRENT_UPLOADS", "16"))
 async_executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
-for _ in range(MAX_WORKERS):
-    async_executor.submit(lambda : time.sleep(0.1))
 
 
 def get_s3_backend(url):
@@ -57,11 +58,18 @@ class Queue:
         self._count = 0
 
     def enter(self, max_queue_size=-1, **kwargs):
-        # if max_queue_size >= 0 and self._count > max_queue_size:
-        #     op = kwargs['op'] if "op" in kwargs else ""
-        #     sys.stderr.write(f"waiting for op {op}: {self._count} > {max_queue_size}\n")
+        print_debug = False
+        if print_debug:
+            print_enter = False
+            if max_queue_size >= 0 and self._count > max_queue_size:
+                print_enter = True
+                op = kwargs['op'] if "op" in kwargs else ""
+                sys.stderr.write(f"waiting for op {op}: {self._count} > {max_queue_size}\n")
         while max_queue_size >= 0 and self._count > max_queue_size:
             time.sleep(0.001)
+        if print_debug:
+            if print_enter: 
+                sys.stderr.write(f"done waiting for {op}\n")
         self._lock.acquire()
         self._count += 1
         self._lock.release()
@@ -71,6 +79,7 @@ class Queue:
         self._lock.acquire()
         self._count -= 1
         self._lock.release()
+        pass
     
     def __enter__(self):
         return self
@@ -84,6 +93,9 @@ class S3(BackendBase):
     def __init__(self, bucket: str, path: str, profile: Optional[str] = None, endpoint_url: Optional[str] = None):
         self.delimiter = '/'
         self.dir_file = '.dir'
+
+        logging.getLogger("urllib3").setLevel(logging.ERROR)
+
         self.bucket = bucket
         self.base_path = path.rstrip(self.delimiter) + self.delimiter  # Ensure it ends with '/'
         self.opened = False
@@ -157,6 +169,8 @@ class S3(BackendBase):
             raise BackendMustBeOpen()
         validate_name(name)
         key = self.base_path + name
+        #with self.queue.enter(max_queue_size=MAX_WORKERS, op="store"):
+        #    self.s3.put_object(Bucket=self.bucket, Key=key, Body=value)
         self.queue.enter(max_queue_size=MAX_WORKERS, op="store")
         async_executor.submit(lambda : self._async_store(key, value))
 
@@ -230,31 +244,31 @@ class S3(BackendBase):
             raise BackendMustBeOpen()
         validate_name(name)
         base_prefix = (self.base_path + name).rstrip(self.delimiter) + self.delimiter
-        with self.queue.enter(max_queue_size=0, op="list"):
-            try:
-                start_after = ''
-                is_truncated = True
-                while is_truncated:
+        try:
+            start_after = ''
+            is_truncated = True
+            while is_truncated:
+                with self.queue.enter(max_queue_size=0, op="list"):
                     objects = self.s3.list_objects_v2(Bucket=self.bucket, Prefix=base_prefix,
                                                       Delimiter=self.delimiter, MaxKeys=1000, StartAfter=start_after)
-                    if objects['KeyCount'] == 0:
-                        raise ObjectNotFound(name)
-                    is_truncated = objects["IsTruncated"]
-                    if "Contents" not in objects and "CommonPrefixes" not in objects:
-                        pass
-                    for obj in objects.get("Contents", []):
-                        obj_name = obj["Key"][len(base_prefix):]  # Remove base_path prefix
-                        if obj_name == self.dir_file:
-                            continue
-                        if obj_name.endswith(TMP_SUFFIX):
-                            continue
-                        start_after = obj["Key"]
-                        yield ItemInfo(name=obj_name, exists=True, size=obj["Size"], directory=False)
-                    for prefix in objects.get("CommonPrefixes", []):
-                        dir_name = prefix["Prefix"][len(base_prefix):-1]  # Remove base_path prefix and trailing slash
-                        yield ItemInfo(name=dir_name, exists=True, size=0, directory=True)
-            except self.s3.exceptions.ClientError as e:
-                raise BackendError(f"S3 error: {e}")
+                if objects['KeyCount'] == 0:
+                    raise ObjectNotFound(name)
+                is_truncated = objects["IsTruncated"]
+                if "Contents" not in objects and "CommonPrefixes" not in objects:
+                    pass
+                for obj in objects.get("Contents", []):
+                    obj_name = obj["Key"][len(base_prefix):]  # Remove base_path prefix
+                    if obj_name == self.dir_file:
+                        continue
+                    if obj_name.endswith(TMP_SUFFIX):
+                        continue
+                    start_after = obj["Key"]
+                    yield ItemInfo(name=obj_name, exists=True, size=obj["Size"], directory=False)
+                for prefix in objects.get("CommonPrefixes", []):
+                    dir_name = prefix["Prefix"][len(base_prefix):-1]  # Remove base_path prefix and trailing slash
+                    yield ItemInfo(name=dir_name, exists=True, size=0, directory=True)
+        except self.s3.exceptions.ClientError as e:
+            raise BackendError(f"S3 error: {e}")
 
     def mkdir(self, name):
         if not self.opened:
