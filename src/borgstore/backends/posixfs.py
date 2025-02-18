@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import stat
 import tempfile
+from typing import Iterator
 
 from ._base import BackendBase, ItemInfo, validate_name
 from .errors import BackendError, BackendAlreadyExists, BackendDoesNotExist, BackendMustNotBeOpen, BackendMustBeOpen
@@ -45,6 +46,10 @@ class PosixFS(BackendBase):
         self.opened = False
         self.do_fsync = do_fsync  # False = 26x faster, see #10
 
+    def preload(self, iter: Iterator[str]) -> None:
+        """preload values"""
+        pass
+        
     def create(self):
         if self.opened:
             raise BackendMustNotBeOpen()

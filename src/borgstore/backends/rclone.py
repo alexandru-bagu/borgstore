@@ -78,6 +78,10 @@ class Rclone(BackendBase):
         self.user = "borg"
         self.password = secrets.token_urlsafe(32)
 
+    def preload(self, iter: Iterator[str]) -> None:
+        """preload values"""
+        pass
+
     def open(self):
         """
         Start using the rclone server
