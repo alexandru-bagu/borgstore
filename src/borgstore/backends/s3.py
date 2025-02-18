@@ -41,7 +41,6 @@ def get_s3_backend(url):
         (?P<path>.+)  # path
     """
     m = re.match(s3_regex, url, re.VERBOSE)
-    print(m)
     if m:
         profile = m["profile"]
         access_key_id = m["access_key_id"]
@@ -89,17 +88,33 @@ class Queue:
 
         return ReadContext(self)
 
+    def debug(self, msg, param=None):
+        #print(msg, param, "reader count: " + str(self.reader_count), "writer count: " + str(self.writer_count))
+        pass
+
     def _acquire(self):
+        self.debug("begin _acquire")
         with self.reader_lock:
-            self.read_semaphore.acquire(self.max_readers)
+            self.reader_count += 1
+            for i in range(self.max_readers):
+                self.read_semaphore.acquire()
         with self.writer_lock:
-            self.write_semaphore.acquire(self.max_writers)
+            self.writer_count += 1
+            for i in range(self.max_writers):
+                self.write_semaphore.acquire()
+        self.debug("done _acquire")
 
     def _release(self):
+        self.debug("begin _release")
         with self.reader_lock:
-            self.read_semaphore.release(self.max_readers)
+            self.reader_count -= 1
+            for i in range(self.max_readers):
+                self.read_semaphore.release()
         with self.writer_lock:
-            self.write_semaphore.release(self.max_writers)
+            self.writer_count -= 1
+            for i in range(self.max_writers):
+                self.write_semaphore.release()
+        self.debug("done _release")
 
     def acquire_read(self):
         class ReadContext:
@@ -115,17 +130,23 @@ class Queue:
         return ReadContext(self)
 
     def _acquire_read(self):
+        self.debug("begin _acquire_read")
         self.read_semaphore.acquire()
         with self.reader_lock:
             self.reader_count += 1
             if self.reader_count == 1:
-                self.write_semaphore.acquire(self.max_writers)
+                for i in range(self.max_writers):
+                    self.write_semaphore.acquire()
+            self.debug("done _acquire_read")
 
     def _release_read(self):
+        self.debug("begin _release_read")
         with self.reader_lock:
             self.reader_count -= 1
             if self.reader_count == 0:
-                self.write_semaphore.release(self.max_writers)
+                for i in range(self.max_writers):
+                    self.write_semaphore.release()
+            self.debug("done _release_read")
 
         self.read_semaphore.release()
 
@@ -143,17 +164,23 @@ class Queue:
         return WriteContext(self)
 
     def _acquire_write(self):
+        self.debug("begin _acquire_write")
         self.write_semaphore.acquire()
         with self.writer_lock:
             self.writer_count += 1
             if self.writer_count == 1:
-                self.read_semaphore.acquire(self.max_readers)
+                for i in range(self.max_readers):
+                    self.read_semaphore.acquire()
+            self.debug("done _acquire_write")
 
     def _release_write(self):
+        self.debug("begin _release_write")
         with self.writer_lock:
             self.writer_count -= 1
             if self.writer_count == 0:
-                self.read_semaphore.release(self.max_readers)
+                for i in range(self.max_readers):
+                    self.read_semaphore.release()
+            self.debug("done _release_write")
         self.write_semaphore.release()
 
 
