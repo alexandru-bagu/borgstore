@@ -89,6 +89,10 @@ class BackendBase(ABC):
         """return information about <name>"""
 
     @abstractmethod
+    def preload(self, iter: Iterator[str]) -> None:
+        """preload values"""
+
+    @abstractmethod
     def load(self, name: str, *, size=None, offset=0) -> bytes:
         """load value from <name>"""
 

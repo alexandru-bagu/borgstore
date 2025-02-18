@@ -6,7 +6,7 @@ from pathlib import Path
 import random
 import re
 import stat
-from typing import Optional
+from typing import Iterator, Optional
 
 try:
     import paramiko
@@ -51,6 +51,10 @@ class Sftp(BackendBase):
         self.opened = False
         if paramiko is None:
             raise BackendError("sftp backend unavailable: could not import paramiko!")
+
+    def preload(self, iter: Iterator[str]) -> None:
+        """preload values"""
+        pass
 
     def _get_host_config_from_file(self, path: str, hostname: str):
         """lookup the configuration for hostname in path (ssh config file)"""
