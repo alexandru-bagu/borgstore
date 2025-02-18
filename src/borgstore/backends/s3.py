@@ -4,7 +4,7 @@ except ImportError:
     boto3 = None
 
 import re
-from typing import Optional
+from typing import Iterator, Optional
 
 from borgstore.constants import TMP_SUFFIX
 
@@ -51,6 +51,10 @@ class S3(BackendBase):
         self.opened = False
         session = boto3.Session(profile_name=profile) if profile else boto3.Session()
         self.s3 = session.client("s3", endpoint_url=endpoint_url)
+
+    def preload(self, iter: Iterator[str]) -> None:
+        """preload values"""
+        pass
 
     def _mkdir(self, name):
         try:
