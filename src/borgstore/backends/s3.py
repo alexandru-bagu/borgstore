@@ -22,7 +22,6 @@ import logging
 MAX_WORKERS = int(os.environ.get("BORG_S3_CONCURRENT_UPLOADS", "16"))
 async_executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
-
 def get_s3_backend(url):
     if boto3 is None:
         return None
@@ -53,40 +52,95 @@ def get_s3_backend(url):
 
 
 class Queue:
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._count = 0
+    def __init__(self, max_readers, max_writers):
+        self.reader_count = 0
+        self.writer_count = 0
+        self.max_readers = max_readers
+        self.max_writers = max_writers
+        self.read_semaphore = threading.Semaphore(max_readers)
+        self.write_semaphore = threading.Semaphore(max_writers)
+        self.reader_lock = threading.Lock()
+        self.writer_lock = threading.Lock()
 
-    def enter(self, max_queue_size=-1, **kwargs):
-        print_debug = False
-        if print_debug:
-            print_enter = False
-            if max_queue_size >= 0 and self._count > max_queue_size:
-                print_enter = True
-                op = kwargs['op'] if "op" in kwargs else ""
-                sys.stderr.write(f"waiting for op {op}: {self._count} > {max_queue_size}\n")
-        while max_queue_size >= 0 and self._count > max_queue_size:
-            time.sleep(0.001)
-        if print_debug:
-            if print_enter: 
-                sys.stderr.write(f"done waiting for {op}\n")
-        self._lock.acquire()
-        self._count += 1
-        self._lock.release()
-        return self
+    def acquire(self):
+        class ReadContext:
+            def __init__(self, semaphore):
+                self.semaphore = semaphore
 
-    def exit(self):
-        self._lock.acquire()
-        self._count -= 1
-        self._lock.release()
-        pass
-    
-    def __enter__(self):
-        return self
+            def __enter__(self):
+                self.semaphore._acquire()
 
-    def __exit__(self, *args):
-        self.exit()
-        return False
+            def __exit__(self, exc_type, exc_value, traceback):
+                self.semaphore._release()
+
+        return ReadContext(self)
+
+    def _acquire(self):
+        with self.reader_lock:
+            self.read_semaphore.acquire(self.max_readers)
+        with self.writer_lock:
+            self.write_semaphore.acquire(self.max_writers)
+
+    def _release(self):
+        with self.reader_lock:
+            self.read_semaphore.release(self.max_readers)
+        with self.writer_lock:
+            self.write_semaphore.release(self.max_writers)
+
+    def acquire_read(self):
+        class ReadContext:
+            def __init__(self, semaphore):
+                self.semaphore = semaphore
+
+            def __enter__(self):
+                self.semaphore._acquire_read()
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                self.semaphore._release_read()
+
+        return ReadContext(self)
+
+    def _acquire_read(self):
+        self.read_semaphore.acquire()
+        with self.reader_lock:
+            self.reader_count += 1
+            if self.reader_count == 1:
+                self.write_semaphore.acquire(self.max_writers)
+
+    def _release_read(self):
+        with self.reader_lock:
+            self.reader_count -= 1
+            if self.reader_count == 0:
+                self.write_semaphore.release(self.max_writers)
+
+        self.read_semaphore.release()
+
+    def acquire_write(self):
+        class WriteContext:
+            def __init__(self, semaphore):
+                self.semaphore = semaphore
+
+            def __enter__(self):
+                self.semaphore._acquire_write()
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                self.semaphore._release_write()
+
+        return WriteContext(self)
+
+    def _acquire_write(self):
+        self.write_semaphore.acquire()
+        with self.writer_lock:
+            self.writer_count += 1
+            if self.writer_count == 1:
+                self.read_semaphore.acquire(self.max_readers)
+
+    def _release_write(self):
+        with self.writer_lock:
+            self.writer_count -= 1
+            if self.writer_count == 0:
+                self.read_semaphore.release(self.max_readers)
+        self.write_semaphore.release()
 
 
 class S3(BackendBase):
@@ -101,7 +155,7 @@ class S3(BackendBase):
         self.opened = False
         session = boto3.Session(profile_name=profile) if profile else boto3.Session()
         self.s3 = session.client("s3", endpoint_url=endpoint_url)
-        self.queue = Queue()
+        self.queue = Queue(MAX_WORKERS, MAX_WORKERS)
 
     def _mkdir(self, name):
         try:
@@ -114,7 +168,7 @@ class S3(BackendBase):
         if self.opened:
             raise BackendMustNotBeOpen()
         try:
-            with self.queue.enter(max_queue_size=0, op="create"):
+            with self.queue.acquire():
                 objects = self.s3.list_objects_v2(Bucket=self.bucket, Prefix=self.base_path,
                                                   Delimiter=self.delimiter, MaxKeys=1)
                 if objects["KeyCount"] > 0:
@@ -129,7 +183,7 @@ class S3(BackendBase):
         if self.opened:
             raise BackendMustNotBeOpen()
         try:
-            with self.queue.enter(max_queue_size=0, op="destroy"):
+            with self.queue.acquire():
                 objects = self.s3.list_objects_v2(Bucket=self.bucket, Prefix=self.base_path,
                                                   Delimiter=self.delimiter, MaxKeys=1)
                 if objects["KeyCount"] == 0:
@@ -154,32 +208,31 @@ class S3(BackendBase):
     def close(self):
         if not self.opened:
             raise BackendMustBeOpen()
-        with self.queue.enter(max_queue_size=0, op="close"):
+        with self.queue.acquire():
             self.opened = False
 
-    def _async_store(self, key, value):
+    def _async_store(self, key, value, lock):
         try:
             self.s3.put_object(Bucket=self.bucket, Key=key, Body=value)
         except self.s3.exceptions.ClientError:
             pass
-        self.queue.exit()
+        lock.__exit__(None, None, None)
 
     def store(self, name, value):
         if not self.opened:
             raise BackendMustBeOpen()
         validate_name(name)
         key = self.base_path + name
-        #with self.queue.enter(max_queue_size=MAX_WORKERS, op="store"):
-        #    self.s3.put_object(Bucket=self.bucket, Key=key, Body=value)
-        self.queue.enter(max_queue_size=MAX_WORKERS, op="store")
-        async_executor.submit(lambda : self._async_store(key, value))
+        lock = self.queue.acquire_write()
+        lock.__enter__()
+        async_executor.submit(lambda : self._async_store(key, value, lock))
 
     def load(self, name, *, size=None, offset=0):
         if not self.opened:
             raise BackendMustBeOpen()
         validate_name(name)
         key = self.base_path + name
-        with self.queue.enter(max_queue_size=0, op="load"):
+        with self.queue.acquire_read():
             try:
                 if size is None and offset == 0:
                     obj = self.s3.get_object(Bucket=self.bucket, Key=key)
@@ -198,12 +251,12 @@ class S3(BackendBase):
             except self.s3.exceptions.NoSuchKey:
                 raise ObjectNotFound(name)
 
-    def _async_delete(self, key, value):
+    def _async_delete(self, key, lock):
         try:
             self.s3.delete_object(Bucket=self.bucket, Key=key)
         except self.s3.exceptions.ClientError:
             pass
-        self.queue.exit()
+        lock.__exit__(None, None, None)
 
     def delete(self, name):
         if not self.opened:
@@ -211,10 +264,11 @@ class S3(BackendBase):
         validate_name(name)
         key = self.base_path + name
         if os.environ.get('BORGSTORE_TEST_S3_URL') is None:
-            self.queue.enter(max_queue_size=MAX_WORKERS, op="delete")
-            async_executor.submit(lambda : self._async_delete(key, key))
+            lock = self.queue.acquire_write()
+            lock.__enter__()
+            async_executor.submit(lambda : self._async_delete(key, lock))
         else:
-            with self.queue.enter(max_queue_size=MAX_WORKERS, op="delete"):
+            with self.queue.acquire_write():
                 try:
                     self.s3.head_object(Bucket=self.bucket, Key=key)
                     self.s3.delete_object(Bucket=self.bucket, Key=key)
@@ -231,7 +285,7 @@ class S3(BackendBase):
         validate_name(new_name)
         src_key = self.base_path + curr_name
         dest_key = self.base_path + new_name
-        with self.queue.enter(max_queue_size=0, op="move"):
+        with self.queue.acquire_write():
             try:
                 self.s3.copy_object(Bucket=self.bucket, CopySource={"Bucket": self.bucket, "Key": src_key},
                                     Key=dest_key)
@@ -248,7 +302,7 @@ class S3(BackendBase):
             start_after = ''
             is_truncated = True
             while is_truncated:
-                with self.queue.enter(max_queue_size=0, op="list"):
+                with self.queue.acquire_read():
                     objects = self.s3.list_objects_v2(Bucket=self.bucket, Prefix=base_prefix,
                                                       Delimiter=self.delimiter, MaxKeys=1000, StartAfter=start_after)
                 if objects['KeyCount'] == 0:
@@ -274,14 +328,14 @@ class S3(BackendBase):
         if not self.opened:
             raise BackendMustBeOpen()
         validate_name(name)
-        with self.queue.enter(max_queue_size=0, op="mkdir"):
+        with self.queue.acquire_write():
             self._mkdir(name)
 
     def rmdir(self, name):
         if not self.opened:
             raise BackendMustBeOpen()
         validate_name(name)
-        with self.queue.enter(max_queue_size=0, op="rmdir"):
+        with self.queue.acquire_write():
             prefix = self.base_path + name.rstrip(self.delimiter) + self.delimiter
             objects = self.s3.list_objects_v2(Bucket=self.bucket, Prefix=prefix, Delimiter=self.delimiter, MaxKeys=2)
             if "Contents" in objects and len(objects["Contents"]) > 1:
@@ -293,7 +347,7 @@ class S3(BackendBase):
             raise BackendMustBeOpen()
         validate_name(name)
         key = self.base_path + name
-        with self.queue.enter(max_queue_size=0, op="info"):
+        with self.queue.acquire_read():
             try:
                 obj = self.s3.head_object(Bucket=self.bucket, Key=key)
                 return ItemInfo(name=name, exists=True, directory=False, size=obj["ContentLength"])
