@@ -6,7 +6,7 @@ Docs that are not backend-specific are also found here.
 
 from abc import ABC, abstractmethod
 from collections import namedtuple
-from typing import Iterator
+from typing import Iterator, List
 
 from ..constants import MAX_NAME_LENGTH
 
@@ -89,7 +89,7 @@ class BackendBase(ABC):
         """return information about <name>"""
 
     @abstractmethod
-    def preload(self, iter: Iterator[str]) -> None:
+    def preload(self, iter: List[str]) -> None:
         """preload values"""
 
     @abstractmethod

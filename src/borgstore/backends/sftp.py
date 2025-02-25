@@ -6,7 +6,7 @@ from pathlib import Path
 import random
 import re
 import stat
-from typing import Iterator, Optional
+from typing import List, Optional
 
 try:
     import paramiko
@@ -52,7 +52,7 @@ class Sftp(BackendBase):
         if paramiko is None:
             raise BackendError("sftp backend unavailable: could not import paramiko!")
 
-    def preload(self, iter: Iterator[str]) -> None:
+    def preload(self, iter: List[str]) -> None:
         """preload values"""
         pass
 

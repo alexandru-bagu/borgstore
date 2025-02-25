@@ -8,7 +8,7 @@ import requests
 import subprocess
 import json
 import secrets
-from typing import Iterator
+from typing import Iterator, List
 import time
 import socket
 
@@ -79,7 +79,7 @@ class Rclone(BackendBase):
         self.user = "borg"
         self.password = secrets.token_urlsafe(32)
 
-    def preload(self, iter: Iterator[str]) -> None:
+    def preload(self, iter: List[str]) -> None:
         """preload values"""
         pass
 

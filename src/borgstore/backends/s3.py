@@ -4,7 +4,7 @@ except ImportError:
     boto3 = None
 
 import re
-from typing import Iterator, Optional
+from typing import List, Optional
 
 from ..constants import TMP_SUFFIX
 
@@ -17,9 +17,10 @@ import os
 import time
 import sys
 import logging
+import threading
+import collections
 
-
-MAX_WORKERS = int(os.environ.get("BORG_S3_CONCURRENT_UPLOADS", "16"))
+MAX_WORKERS = int(os.environ.get("BORG_S3_CONCURRENT_UPLOADS", "32"))
 async_executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
 def get_s3_backend(url):
@@ -62,6 +63,77 @@ def get_s3_backend(url):
                 endpoint_url += f":{port}"
         return S3(bucket=bucket, path=path, profile=profile,
                   access_key_id=access_key_id, access_key_secret=access_key_secret, endpoint_url=endpoint_url)
+
+
+
+class PreloadQueue:
+    def __init__(self, item_list, max_cache_size, download_function, async_executor):
+        self.item_list = iter(item_list)  # Iterator over the list
+        self.max_cache_size = max_cache_size
+        self.download_function = download_function  # Function to download items
+        self.async_executor = async_executor  # ThreadPoolExecutor for parallel processing
+        
+        self.cache = {}  # Dictionary to store items
+        self.usage_count = collections.Counter()  # Track usage of items
+        self.count = 0
+        self.lock = threading.Lock()
+        self.not_empty = threading.Condition(self.lock)
+        
+        self._start_writer()
+    
+    def _start_writer(self):
+        """Starts the writer tasks in the ThreadPoolExecutor."""
+        for item in self.item_list:
+            self.async_executor.submit(self._process_item, item)
+    
+    def _process_item(self, item):
+        """Processes an individual item, adding it to the cache."""
+        data = None
+        
+        with self.lock:
+             if item in self.cache:
+                data = self.cache[item]
+
+        if data is None:
+            data = self.download_function(item)
+                
+        with self.lock:
+            while self.count >= self.max_cache_size:
+                self.not_empty.wait()
+            
+            if item in self.cache:
+                self.usage_count[item] += 1
+                if self.usage_count[item] == 0:
+                    del self.cache[item]
+            else:
+                self.cache[item] = data
+                self.usage_count[item] = 1
+                self.count = self.count + 1
+            self.not_empty.notify_all()
+    
+    def get(self, item):
+        """Fetch an item from the queue, ensuring ordered processing."""
+        with self.lock:
+            if item in self.cache:
+                self.usage_count[item] -= 1
+                data = self.cache[item]
+                if self.usage_count[item] == 0:
+                    del self.cache[item]
+                    self.count = self.count - 1
+                self.not_empty.notify_all()
+                return data
+        data = self.download_function(item)
+        with self.lock:
+            if item not in self.cache:
+                self.usage_count[item] = 0
+                self.cache[item] = data
+            self.usage_count[item] -= 1
+            if self.usage_count[item] == 0:
+                del self.cache[item]
+            self.not_empty.notify_all()
+        return data
+                
+
 
 
 class Queue:
@@ -204,9 +276,11 @@ class S3(BackendBase):
             session = boto3.Session()
         self.s3 = session.client("s3", endpoint_url=endpoint_url)
         self.queue = Queue(MAX_WORKERS, MAX_WORKERS)
+        self.preload_queue = None
 
-    def preload(self, iter: Iterator[str]) -> None:
+    def preload(self, iter: List[str]) -> None:
         """preload values"""
+        self.preload_queue = PreloadQueue(iter, MAX_WORKERS, lambda x : self._load(x, size=None, offset=0), async_executor)
         pass
 
     def _mkdir(self, name):
@@ -279,7 +353,7 @@ class S3(BackendBase):
         lock.__enter__()
         async_executor.submit(lambda : self._async_store(key, value, lock))
 
-    def load(self, name, *, size=None, offset=0):
+    def _load(self, name, size=None, offset=0):
         if not self.opened:
             raise BackendMustBeOpen()
         validate_name(name)
@@ -302,6 +376,11 @@ class S3(BackendBase):
                     return obj["Body"].read()
             except self.s3.exceptions.NoSuchKey:
                 raise ObjectNotFound(name)
+
+    def load(self, name, *, size=None, offset=0):
+        if self.preload_queue is not None and size is None and offset == 0:
+            return self.preload_queue.get(name)
+        return self._load(name, size, offset)
 
     def _async_delete(self, key, lock):
         try:
