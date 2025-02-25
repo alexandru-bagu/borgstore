@@ -337,7 +337,7 @@ class S3(BackendBase):
         validate_name(new_name)
         src_key = self.base_path + curr_name
         dest_key = self.base_path + new_name
-        with self.queue.acquire_write():
+        with self.queue.acquire():
             try:
                 self.s3.copy_object(Bucket=self.bucket, CopySource={"Bucket": self.bucket, "Key": src_key},
                                     Key=dest_key)
