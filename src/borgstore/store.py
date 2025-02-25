@@ -190,16 +190,16 @@ class Store:
         suffix = DEL_SUFFIX if deleted else None
         for level in self._get_levels(name):
             nested_name = nest(name, level, add_suffix=suffix)
-            #info = self.backend.info(nested_name)
-            #if info.exists:
-            #    break
+            info = self.backend.info(nested_name)
+            if info.exists:
+                break
         return nested_name
 
     def info(self, name: str, *, deleted=False) -> ItemInfo:
         with self._stats_updater("info"):
             return self.backend.info(self.find(name, deleted=deleted))
 
-    def preload(self, iter: Iterator[str] | None) -> None:
+    def preload(self, iter: Iterator[str] = None) -> None:
         self.backend.preload(iter)
 
     def load(self, name: str, *, size=None, offset=0, deleted=False) -> bytes:
