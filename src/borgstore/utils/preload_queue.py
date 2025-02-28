@@ -1,10 +1,12 @@
-
 import collections
+from concurrent.futures import ThreadPoolExecutor
 import threading
+from typing import Any, Callable, List
 
 class PreloadQueue:
-    def __init__(self, item_list, max_cache_size, download_function, async_executor):
-        self.item_list = iter(item_list)  # Iterator over the list
+    def __init__(self, item_list: List[Any], max_cache_size: int, download_function: Callable[[Any], Any], async_executor: ThreadPoolExecutor):
+        self.item_list = item_list  # Iterator over the list
+        self.item_set = set(item_list)  # Iterator over the list
         self.max_cache_size = max_cache_size
         self.download_function = download_function  # Function to download items
         self.async_executor = async_executor  # ThreadPoolExecutor for parallel processing
@@ -19,8 +21,16 @@ class PreloadQueue:
     
     def _start_writer(self):
         """Starts the writer tasks in the ThreadPoolExecutor."""
-        for item in self.item_list:
-            self.async_executor.submit(self._process_item, item)
+        current_item = None
+        count = 0
+        for i in range(0, len(self.item_list), 1):
+            item = self.item_list[i]
+            if current_item != item and count > 0:
+                self.async_executor.submit(self._process_item, [current_item, count])
+                current_item = item
+                count = 0
+            count = count + 1
+        self.async_executor.submit(self._process_item, [current_item, count])
     
     def _count_item(self, item, data, increment):
         if item not in self.cache:
@@ -39,23 +49,29 @@ class PreloadQueue:
                     self.count = self.count + 1
         self.not_empty.notify_all()
     
-    def _process_item(self, item):
+    def _process_item(self, array):
         """Processes an individual item, adding it to the cache."""
+        item = array[0]
+        count = array[1]
+
         data = None
-        
         with self.lock:
              if item in self.cache:
                 data = self.cache[item]
-        if data is None:
-            data = self.download_function(item)
-                
         with self.lock:
             while self.count >= self.max_cache_size:
                 self.not_empty.wait()
-            self._count_item(item, data, 1)
-    
+            self.count = self.count + 1
+        if data is None:
+            data = self.download_function(item)
+        with self.lock:
+            self.count = self.count - 1
+            self._count_item(item, data, count)
+
     def get(self, item):
         """Fetch an item from the queue, ensuring ordered processing."""
+        if item not in self.item_set:
+            return self.download_function(item)
         with self.lock:
             if item in self.cache:
                 data = self.cache[item]

@@ -15,6 +15,7 @@ from ..utils.preload_queue import PreloadQueue
 from ..utils.read_write_queue import ReadWriteQueue
 from ..utils.parallelization import Parallelization
 import os
+import sys
 import logging
 
 def get_s3_backend(url):
@@ -84,7 +85,8 @@ class S3(BackendBase):
 
     def preload(self, iter: List[str]) -> None:
         """preload values"""
-        self.preload_queue = PreloadQueue(iter, self.parallelization.workers, lambda x : self._load(x, size=None, offset=0), self.parallelization.executor)
+        cache_size = int(os.environ.get("BORG_PRELOAD_CACHE_SIZE", "64"))
+        self.preload_queue = PreloadQueue(iter, cache_size, lambda x : self._load(x, size=None, offset=0), self.parallelization.executor)
 
     def _mkdir(self, name):
         try:
@@ -161,6 +163,8 @@ class S3(BackendBase):
             raise BackendMustBeOpen()
         validate_name(name)
         key = self.base_path + name
+        #sys.stderr.write(f"dl {key}\n")
+        #sys.stderr.flush()
         with self.queue.acquire_read():
             try:
                 if size is None and offset == 0:

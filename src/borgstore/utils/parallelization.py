@@ -12,5 +12,5 @@ class Parallelization:
         return cls._instance
     
     def __init__(self):
-        self.workers = int(os.environ.get("BORG_PARALLEL_WORKERS", "32"))
+        self.workers = int(os.environ.get("BORG_PARALLEL_WORKERS", "16"))
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.workers)
