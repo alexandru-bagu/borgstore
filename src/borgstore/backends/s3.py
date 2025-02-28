@@ -85,8 +85,7 @@ class S3(BackendBase):
 
     def preload(self, iter: List[str]) -> None:
         """preload values"""
-        cache_size = int(os.environ.get("BORG_PRELOAD_CACHE_SIZE", "64"))
-        self.preload_queue = PreloadQueue(iter, cache_size, lambda x : self._load(x, size=None, offset=0), self.parallelization.executor)
+        self.preload_queue = PreloadQueue(iter, self.parallelization.preload_cache_size, lambda x : self._load(x, size=None, offset=0), self.parallelization.executor)
 
     def _mkdir(self, name):
         try:

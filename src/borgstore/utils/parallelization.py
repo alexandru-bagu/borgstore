@@ -13,4 +13,5 @@ class Parallelization:
     
     def __init__(self):
         self.workers = int(os.environ.get("BORG_PARALLEL_WORKERS", "16"))
+        self.preload_cache_size = int(os.environ.get("BORG_PRELOAD_CACHE_SIZE", "64"))
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.workers)
