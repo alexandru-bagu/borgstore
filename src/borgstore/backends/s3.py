@@ -4,6 +4,7 @@ except ImportError:
     boto3 = None
 
 import re
+import time
 from typing import List, Optional
 
 from ..constants import TMP_SUFFIX
@@ -85,7 +86,8 @@ class S3(BackendBase):
 
     def preload(self, iter: List[str]) -> None:
         """preload values"""
-        self.preload_queue = PreloadQueue(iter, self.parallelization.preload_cache_size, lambda x : self._load(x, size=None, offset=0), self.parallelization.executor)
+        list = [x for x in iter if x.startswith('/data/')]
+        self.preload_queue = PreloadQueue(list, self.parallelization.preload_cache_size, lambda x : self._load(x, size=None, offset=0), self.parallelization.executor)
 
     def _mkdir(self, name):
         try:
@@ -141,29 +143,37 @@ class S3(BackendBase):
         with self.queue.acquire():
             self.opened = False
 
-    def _async_store(self, key, value, lock):
-        try:
-            self.s3.put_object(Bucket=self.bucket, Key=key, Body=value)
-        except self.s3.exceptions.ClientError:
-            pass
-        lock.__exit__(None, None, None)
+    def _store(self, key, value, lock = None):
+        success = False
+        sleep = 0.2
+        for i in range(0, 32):
+            if not success:
+                try:
+                    self.s3.put_object(Bucket=self.bucket, Key=key, Body=value)
+                    success = True
+                except self.s3.exceptions.ClientError:
+                    time.sleep(sleep)
+                    sleep = sleep * 2
+        if lock:
+            lock.__exit__(None, None, None)
 
     def store(self, name, value):
         if not self.opened:
             raise BackendMustBeOpen()
         validate_name(name)
-        key = self.base_path + name
-        lock = self.queue.acquire_write()
-        lock.__enter__()
-        self.parallelization.executor.submit(lambda : self._async_store(key, value, lock))
+        if name.startswith('/data/'):
+            key = self.base_path + name
+            lock = self.queue.acquire_write()
+            lock.__enter__()
+            self.parallelization.executor.submit(lambda : self._store(key, value, lock))
+        else:
+            self._store(key, value)
 
     def _load(self, name, size=None, offset=0):
         if not self.opened:
             raise BackendMustBeOpen()
         validate_name(name)
         key = self.base_path + name
-        #sys.stderr.write(f"dl {key}\n")
-        #sys.stderr.flush()
         with self.queue.acquire_read():
             try:
                 if size is None and offset == 0:
@@ -184,16 +194,23 @@ class S3(BackendBase):
                 raise ObjectNotFound(name)
 
     def load(self, name, *, size=None, offset=0):
-        if self.preload_queue is not None and size is None and offset == 0:
+        if name.startswith('/data/') and self.preload_queue is not None and size is None and offset == 0:
             return self.preload_queue.get(name)
         return self._load(name, size, offset)
 
-    def _async_delete(self, key, lock):
-        try:
-            self.s3.delete_object(Bucket=self.bucket, Key=key)
-        except self.s3.exceptions.ClientError:
-            pass
-        lock.__exit__(None, None, None)
+    def _delete(self, key, lock = None):
+        success = False
+        sleep = 0.2
+        for i in range(0, 32):
+            if not success:
+                try:
+                    self.s3.delete_object(Bucket=self.bucket, Key=key)
+                    success = True
+                except self.s3.exceptions.ClientError:
+                    time.sleep(sleep)
+                    sleep = sleep * 2
+        if lock:
+            lock.__exit__(None, None, None)
 
     def delete(self, name):
         if not self.opened:
@@ -201,9 +218,12 @@ class S3(BackendBase):
         validate_name(name)
         key = self.base_path + name
         if os.environ.get('BORGSTORE_TEST_S3_URL') is None:
-            lock = self.queue.acquire_write()
-            lock.__enter__()
-            self.parallelization.executor.submit(lambda : self._async_delete(key, lock))
+            if name.startswith('/data/'):
+                lock = self.queue.acquire_write()
+                lock.__enter__()
+                self.parallelization.executor.submit(lambda : self._delete(key, lock))
+            else:
+                self._delete(key)
         else:
             with self.queue.acquire_write():
                 try:
@@ -214,6 +234,7 @@ class S3(BackendBase):
                 except self.s3.exceptions.ClientError as e:
                     if e.response['Error']['Code'] == '404':
                         raise ObjectNotFound(name)
+
 
     def move(self, curr_name, new_name):
         if not self.opened:
