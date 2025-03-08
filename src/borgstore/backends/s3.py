@@ -161,8 +161,8 @@ class S3(BackendBase):
         if not self.opened:
             raise BackendMustBeOpen()
         validate_name(name)
+        key = self.base_path + name
         if name.startswith('/data/'):
-            key = self.base_path + name
             lock = self.queue.acquire_write()
             lock.__enter__()
             self.parallelization.executor.submit(lambda : self._store(key, value, lock))
