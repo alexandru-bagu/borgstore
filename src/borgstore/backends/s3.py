@@ -86,7 +86,7 @@ class S3(BackendBase):
 
     def preload(self, iter: List[str]) -> None:
         """preload values"""
-        list = [x for x in iter if x.startswith('/data/')]
+        list = [x for x in iter if x.startswith('data/')]
         self.preload_queue = PreloadQueue(list, self.parallelization.preload_cache_size, lambda x : self._load(x, size=None, offset=0), self.parallelization.executor)
 
     def _mkdir(self, name):
@@ -162,7 +162,7 @@ class S3(BackendBase):
             raise BackendMustBeOpen()
         validate_name(name)
         key = self.base_path + name
-        if name.startswith('/data/'):
+        if name.startswith('data/'):
             lock = self.queue.acquire_write()
             lock.__enter__()
             self.parallelization.executor.submit(lambda : self._store(key, value, lock))
@@ -194,7 +194,7 @@ class S3(BackendBase):
                 raise ObjectNotFound(name)
 
     def load(self, name, *, size=None, offset=0):
-        if name.startswith('/data/') and self.preload_queue is not None and size is None and offset == 0:
+        if name.startswith('data/') and self.preload_queue is not None and size is None and offset == 0:
             return self.preload_queue.get(name)
         return self._load(name, size, offset)
 
@@ -218,7 +218,7 @@ class S3(BackendBase):
         validate_name(name)
         key = self.base_path + name
         if os.environ.get('BORGSTORE_TEST_S3_URL') is None:
-            if name.startswith('/data/'):
+            if name.startswith('data/'):
                 lock = self.queue.acquire_write()
                 lock.__enter__()
                 self.parallelization.executor.submit(lambda : self._delete(key, lock))
