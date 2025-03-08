@@ -165,7 +165,7 @@ class Store:
         for key in "load", "store":
             v = st.get(f"{key}_volume", 0)
             t = st.get(f"{key}_time", 0)
-            st[f"{key}_throughput"] = v / t
+            st[f"{key}_throughput"] = 0 if t == 0 else v / t
         return st
 
     def _get_levels(self, name):
