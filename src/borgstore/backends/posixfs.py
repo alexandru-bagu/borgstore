@@ -14,7 +14,9 @@ from ._base import BackendBase, ItemInfo, validate_name
 from .errors import BackendError, BackendAlreadyExists, BackendDoesNotExist, BackendMustNotBeOpen, BackendMustBeOpen
 from .errors import ObjectNotFound
 from ..constants import TMP_SUFFIX
-
+from ..utils.preload_queue import PreloadQueue
+from ..utils.read_write_queue import ReadWriteQueue
+from ..utils.parallelization import Parallelization
 
 def get_file_backend(url):
     # file:///absolute/path
@@ -45,10 +47,14 @@ class PosixFS(BackendBase):
             raise BackendError("path must be an absolute path")
         self.opened = False
         self.do_fsync = do_fsync  # False = 26x faster, see #10
+        self.parallelization = Parallelization()
+        self.queue = ReadWriteQueue(self.parallelization.workers, self.parallelization.workers)
+        self.preload_queue = None
 
     def preload(self, iter: List[str]) -> None:
         """preload values"""
-        pass
+        list = [x for x in iter if x.startswith('data/')]
+        self.preload_queue = PreloadQueue(list, self.parallelization.preload_cache_size, lambda x : self._load(x, size=None, offset=0), self.parallelization.executor)
         
     def create(self):
         if self.opened:
@@ -115,7 +121,7 @@ class PosixFS(BackendBase):
             is_dir = stat.S_ISDIR(st.st_mode)
             return ItemInfo(name=path.name, exists=True, directory=is_dir, size=st.st_size)
 
-    def load(self, name, *, size=None, offset=0):
+    def _load(self, name, size=None, offset=0):
         if not self.opened:
             raise BackendMustBeOpen()
         path = self._validate_join(name)
@@ -126,6 +132,11 @@ class PosixFS(BackendBase):
                 return f.read(-1 if size is None else size)
         except FileNotFoundError:
             raise ObjectNotFound(name) from None
+
+    def load(self, name, *, size=None, offset=0):
+        if name.startswith('data/') and self.preload_queue is not None and size is None and offset == 0:
+            return self.preload_queue.get(name)
+        return self._load(name, size, offset)
 
     def store(self, name, value):
         def _write_to_tmpfile():
