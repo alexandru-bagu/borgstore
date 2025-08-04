@@ -139,37 +139,21 @@ class PosixFS(BackendBase):
         return self._load(name, size, offset)
 
     def store(self, name, value):
-        def _write_to_tmpfile():
-            with tempfile.NamedTemporaryFile(suffix=TMP_SUFFIX, dir=tmp_dir, delete=False) as f:
+        if not self.opened:
+            raise BackendMustBeOpen()
+        path = self._validate_join(name)
+        try:
+            # Only create if it doesn't already exist (atomic on POSIX)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            with os.fdopen(fd, "w") as f:
                 f.write(value)
                 if self.do_fsync:
                     f.flush()
                     os.fsync(f.fileno())
-                tmp_path = Path(f.name)
-            return tmp_path
-
-        if not self.opened:
-            raise BackendMustBeOpen()
-        path = self._validate_join(name)
-        tmp_dir = path.parent
-        # write to a differently named temp file in same directory first,
-        # so the store never sees partially written data.
-        try:
-            # try to do it quickly, not doing the mkdir. fs ops might be slow, esp. on network fs (latency).
-            # this will frequently succeed, because the dir is already there.
-            tmp_path = _write_to_tmpfile()
-        except FileNotFoundError:
-            # retry, create potentially missing dirs first. this covers these cases:
-            # - either the dirs were not precreated
-            # - a previously existing directory was "lost" in the filesystem
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            tmp_path = _write_to_tmpfile()
-        # all written and synced to disk, rename it to the final name:
-        try:
-            tmp_path.replace(path)
-        except OSError:
-            tmp_path.unlink()
-            raise
+            # File is safely created and flushed
+        except FileExistsError:
+            # Another process already created the file, skip storing
+            pass
 
     def delete(self, name):
         if not self.opened:
